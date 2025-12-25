@@ -6,14 +6,6 @@ A Python client library for the [ESB OMS (Order Management System) API](https://
 > This library provides a type-safe interface to the ESB OMS API with automatic token management.
 > For detailed API specifications, refer to the [official documentation](https://developers.esb.co.id/esb-oms/).
 
-## Features
-
-- Type-safe API client using Pydantic v2
-- Support for all ESB OMS API endpoints
-- Automatic token management and refresh
-- Multiple authentication methods (username/password, static token)
-- Support for multiple environments (Production, Staging)
-
 ## Installation
 
 ```bash
