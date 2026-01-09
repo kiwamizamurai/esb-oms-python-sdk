@@ -406,6 +406,7 @@ class BearerHTTPClient(HTTPClient):
         *,
         base_url: str,
         get_token: Callable[[], str | None],
+        refresh_token_callback: Callable[[], bool] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         headers: dict[str, str] | None = None,
     ) -> None:
@@ -414,11 +415,13 @@ class BearerHTTPClient(HTTPClient):
         Args:
             base_url: Base URL for API requests.
             get_token: Callback function to get the current Bearer token.
+            refresh_token_callback: Optional callback to refresh token on 401.
             timeout: Request timeout in seconds.
             headers: Additional headers to include in all requests.
         """
         super().__init__(base_url=base_url, timeout=timeout, headers=headers)
         self._get_token = get_token
+        self._refresh_token_callback = refresh_token_callback
 
     def _prepare_auth(self) -> tuple[dict[str, str], httpx.Auth | None]:
         """Prepare Bearer token authentication.
@@ -430,6 +433,108 @@ class BearerHTTPClient(HTTPClient):
         if token:
             return {"Authorization": f"Bearer {token}"}, None
         return {}, None
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json: Any | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any] | list[Any]:
+        """Make an HTTP request to the API with automatic token refresh.
+
+        Args:
+            method: HTTP method (GET, POST, etc.).
+            path: API endpoint path.
+            params: Query parameters.
+            json: JSON body data.
+            headers: Additional headers for this request.
+
+        Returns:
+            Parsed JSON response as a dictionary or list.
+
+        Raises:
+            ESBAuthenticationError: When authentication fails.
+            ESBAuthorizationError: When permission is denied.
+            ESBValidationError: When request validation fails.
+            ESBNotFoundError: When resource is not found.
+            ESBRateLimitError: When rate limit is exceeded.
+            ESBServerError: When server returns 5xx error.
+            ESBConnectionError: When connection fails.
+            ESBTimeoutError: When request times out.
+            ESBError: For other API errors.
+        """
+        # First attempt - normal request
+        auth_headers, auth = self._prepare_auth()
+        request_headers = {**auth_headers, **(headers or {})}
+
+        log = logger.bind(method=method, path=path)
+        log.debug("http_request_start", params=params, has_body=json is not None)
+
+        response = self._make_request(
+            method, path, params, json, request_headers, auth
+        )
+
+        # Check if we got a 401 Unauthorized response and have a refresh callback
+        if response.status_code == 401 and self._refresh_token_callback:
+            log.info("Received 401, attempting token refresh")
+
+            # Try to refresh the token
+            if self._refresh_token_callback():
+                # Token refresh succeeded, retry the request
+                log.info("Token refresh successful, retrying request")
+                # Get new token for retry
+                auth_headers, auth = self._prepare_auth()
+                request_headers = {**auth_headers, **(headers or {})}
+
+                # Retry the request with new token
+                response = self._make_request(
+                    method, path, params, json, request_headers, auth
+                )
+            else:
+                log.warning("Token refresh failed")
+
+        log.debug("http_request_complete", status_code=response.status_code)
+        return self._handle_response(response)
+
+    def _make_request(
+        self,
+        method: str,
+        path: str,
+        params: Mapping[str, Any] | None,
+        json: Any | None,
+        headers: dict[str, str],
+        auth: httpx.Auth | None,
+    ) -> httpx.Response:
+        """Make the actual HTTP request."""
+        try:
+            response = self.client.request(
+                method=method,
+                url=path,
+                params=params,
+                json=json,
+                headers=headers,
+                auth=auth,
+            )
+            return response
+        except httpx.TimeoutException as e:
+            log = logger.bind(method=method, path=path)
+            log.warning("http_request_timeout", timeout=self._timeout)
+            raise ESBTimeoutError(
+                f"Request to {path} timed out after {self._timeout}s"
+            ) from e
+        except httpx.ConnectError as e:
+            log = logger.bind(method=method, path=path)
+            log.exception("http_connection_error")
+            raise ESBConnectionError(
+                f"Failed to connect to {self._base_url}: {e}"
+            ) from e
+        except httpx.HTTPError as e:
+            log = logger.bind(method=method, path=path)
+            log.exception("http_error")
+            raise ESBConnectionError(f"HTTP error occurred: {e}") from e
 
 
 class BasicAuthHTTPClient(HTTPClient):

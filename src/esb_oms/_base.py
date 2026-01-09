@@ -94,6 +94,7 @@ class BaseClient:
         self._api_http = BearerHTTPClient(
             base_url=get_api_url(environment),
             get_token=self._get_token,
+            refresh_token_callback=self._refresh_token_if_needed,
             timeout=timeout,
         )
 
@@ -109,11 +110,24 @@ class BaseClient:
         self._core_bearer_http = BearerHTTPClient(
             base_url=get_core_url(environment),
             get_token=self._get_token,
+            refresh_token_callback=self._refresh_token_if_needed,
             timeout=timeout,
         )
 
         # Initialize Auth API (uses core HTTP client)
         self._auth = AuthAPI(self._core_http)
+
+        # If using credentials (not static token) and auto_refresh is enabled,
+        # attempt initial authentication
+        if self.auto_refresh and self._username and self._password and not self._static_token:
+            try:
+                self._get_token()
+            except ESBAuthenticationError:
+                # Log authentication failure but don't raise - let it fail on first API call
+                logger.warning("Initial authentication failed - will retry on first API call")
+            except Exception as e:
+                # Log other unexpected errors
+                logger.error("Unexpected error during initial authentication", error=str(e))
 
     @property
     def auth(self) -> AuthAPI:
@@ -140,15 +154,54 @@ class BaseClient:
 
         This is used by BearerHTTPClient to get the token for requests.
         If using static token, returns that. Otherwise returns access token.
+        Automatically authenticates if needed and auto_refresh is enabled.
 
         Returns:
             The current token or None if not authenticated.
         """
         if self._static_token:
             return self._static_token
+
+        # If we have a token, return it
         if self._token_info:
             return self._token_info.access_token
+
+        # If auto_refresh is enabled and we have credentials, authenticate automatically
+        if self.auto_refresh and self._username and self._password:
+            try:
+                self.login()
+                if self._token_info:
+                    return self._token_info.access_token
+            except ESBAuthenticationError:
+                # Re-raise authentication errors so they're not hidden
+                raise
+            except Exception as e:
+                # Log other unexpected errors but still raise them
+                logger.error("Unexpected error during auto-authentication", error=str(e))
+                raise
+
         return None
+
+    def _refresh_token_if_needed(self) -> bool:
+        """Attempt to refresh the access token if we have a refresh token.
+
+        Returns:
+            True if token was successfully refreshed, False otherwise.
+        """
+        if not self._token_info or not self._token_info.refresh_token:
+            return False
+
+        try:
+            self.refresh_token()
+            return True
+        except ESBTokenRefreshError:
+            # Refresh failed, clear token info
+            self._token_info = None
+            return False
+        except Exception:
+            # Unexpected error during refresh
+            self._token_info = None
+            return False
 
     def _get_credentials(self) -> tuple[str, str] | None:
         """Get the Basic Auth credentials.
