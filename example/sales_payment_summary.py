@@ -42,6 +42,8 @@ def main() -> None:
         password=PASSWORD,
         environment=Environment.PRODUCTION,
     ) as client:
+        # Ensure we're authenticated before making API calls
+        client.ensure_authenticated()
         summaries = client.report.get_sales_payment_summary(
             sales_date=sales_date,
         )

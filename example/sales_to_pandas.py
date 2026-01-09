@@ -50,6 +50,8 @@ def main() -> None:
         password=PASSWORD,
         environment=Environment.PRODUCTION,
     ) as client:
+        # Ensure we're authenticated before making API calls
+        client.ensure_authenticated()
         while True:
             sales = client.report.get_sales_information(
                 sales_date_from=date_from,
